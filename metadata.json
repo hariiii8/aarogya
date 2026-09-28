@@ -1,0 +1,12 @@
+{
+  "name": "Remix Remix Remix Remix Remix Remix Remix Remix Remix Remix Remix Remix Remix Remix Remix Remix Remix Remix Remix Remix AAROGYA – Bovine Health \u0026 Mastitis Guard",
+  "description": "Android cattle health and mastitis guard application for dairy farmers with somatic cell count tracking, herd GIS, and veterinary AI.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone",
+    "geolocation"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
