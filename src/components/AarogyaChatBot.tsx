@@ -217,6 +217,32 @@ export const AarogyaChatBot: React.FC<AarogyaChatBotProps> = ({
       affectedQuarter: 'Left-rear quarter',
     };
 
+  // Resolve which cow the user means: explicit mention wins over focus dropdown.
+  // Returns the matched cow (and syncs the Focus dropdown to it).
+  const resolveMentionedCow = (text: string): any => {
+    const q = (text || '').toLowerCase();
+    if (!q.trim()) return targetCow;
+    const pool = herdList.length > 0 ? herdList : (activeCow ? [activeCow] : []);
+    const byId = pool.find((c) => {
+      const id = String(c.id || '').toLowerCase();
+      return id && (q.includes(id) || q.includes(id.replace(/[^a-z0-9]/g, '')));
+    });
+    if (byId) {
+      if (byId.id !== selectedCowId) setSelectedCowId(byId.id);
+      return byId;
+    }
+    const sorted = [...pool]
+      .filter((c) => c?.name && String(c.name).trim().length >= 3)
+      .sort((a, b) => String(b.name).length - String(a.name).length);
+    for (const c of sorted) {
+      if (q.includes(String(c.name).toLowerCase().trim())) {
+        if (c.id !== selectedCowId) setSelectedCowId(c.id);
+        return c;
+      }
+    }
+    return targetCow;
+  };
+
   const handleSend = async (textToSend?: string) => {
     const query = (textToSend || inputQuery).trim();
     if (!query || isLoading) return;
@@ -233,6 +259,9 @@ export const AarogyaChatBot: React.FC<AarogyaChatBotProps> = ({
     setInputQuery('');
     setIsLoading(true);
 
+    // The cow actually asked about (mention wins), not just the dropdown focus
+    const askedCow: any = resolveMentionedCow(query);
+
     try {
       const response = await fetch('/api/gemini/chat', {
         method: 'POST',
@@ -244,17 +273,23 @@ export const AarogyaChatBot: React.FC<AarogyaChatBotProps> = ({
             text: m.text,
           })),
           cowContext: {
-            id: targetCow.id,
-            name: targetCow.name,
-            stall: targetCow.stall,
-            scc: targetCow.scc,
-            temperature: targetCow.temperature,
-            riskLevel: targetCow.riskLevel,
-            riskPercentage: targetCow.riskPercentage,
-            affectedQuarter: (targetCow as any).affectedQuarter || 'Left-rear quarter',
+            id: askedCow.id,
+            name: askedCow.name,
+            stall: askedCow.stall,
+            scc: askedCow.scc,
+            temperature: askedCow.temperature,
+            riskLevel: askedCow.riskLevel,
+            riskPercentage: askedCow.riskPercentage,
+            affectedQuarter: (askedCow as any).affectedQuarter || 'Left-rear quarter',
             vetName: farmSetup?.treatmentRecord?.vetName || 'Dr. Rajesh Sharma',
             vetPhone: farmSetup?.treatmentRecord?.vetPhone || '+91 98960 11982',
           },
+          herdList: (herdList.length > 0 ? herdList : (activeCow ? [activeCow] : [askedCow])).slice(0, 24).map((c) => ({
+            id: c.id, name: c.name, stall: c.stall, scc: c.scc, temperature: c.temperature,
+            riskLevel: c.riskLevel, riskPercentage: c.riskPercentage,
+            affectedQuarter: (c as any).affectedQuarter, milkYield: (c as any).milkYield,
+            ruminationMinutes: (c as any).ruminationMinutes,
+          })),
           language: currentLang,
         }),
       });
@@ -263,8 +298,12 @@ export const AarogyaChatBot: React.FC<AarogyaChatBotProps> = ({
       if (response.ok) {
         const data = await response.json();
         replyText = data.reply || 'Data received.';
+        // If backend resolved a different cow, sync the Focus dropdown to it
+        if (data.resolvedCow?.id && data.resolvedCow.id !== selectedCowId) {
+          setSelectedCowId(data.resolvedCow.id);
+        }
       } else {
-        replyText = getLocalVeterinaryReply(query, targetCow);
+        replyText = getLocalVeterinaryReply(query, askedCow);
       }
 
       // Detect actionable elements
@@ -283,15 +322,15 @@ export const AarogyaChatBot: React.FC<AarogyaChatBotProps> = ({
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         isActionable: hasVetCall,
         actionType: hasVetCall ? 'call_vet' : undefined,
-        actionCowId: targetCow.id,
-        actionStall: targetCow.stall,
+        actionCowId: askedCow.id,
+        actionStall: askedCow.stall,
       };
 
       setMessages((prev) => [...prev, botMessage]);
       speakText(replyText);
     } catch (err) {
       // Offline fallback
-      const fallbackReply = getLocalVeterinaryReply(query, targetCow);
+      const fallbackReply = getLocalVeterinaryReply(query, askedCow);
       const botMsgId = `bot-${Date.now()}`;
       const botMessage: ChatMessage = {
         id: botMsgId,
@@ -310,6 +349,8 @@ export const AarogyaChatBot: React.FC<AarogyaChatBotProps> = ({
 
   const getLocalVeterinaryReply = (query: string, cow: any): string => {
     const q = query.toLowerCase();
+    const cowNameL = String(cow?.name || '').toLowerCase();
+    const cowIdL = String(cow?.id || '').toLowerCase();
     if (q.includes('temp') || q.includes('milk temp') || q.includes('temperature') || q.includes('तापमान')) {
       return `🌡️ **Milk Temperature & Mastitis Detection**:
 • **Normal Milk Temp**: 38.0°C – 38.8°C (~38.5°C normal).
@@ -329,11 +370,12 @@ export const AarogyaChatBot: React.FC<AarogyaChatBotProps> = ({
 • **Action**: Move ${cow.name} to isolation stall ${cow.stall}, withhold milk from bulk vat, and initiate prescribed teat protocol.`;
     }
 
-    if (q.includes('lakshmi') || q.includes('c-024') || q.includes('risk')) {
+    if ((cowNameL && q.includes(cowNameL)) || (cowIdL && q.includes(cowIdL)) || q.includes('risk') || q.includes('how is') || q.includes('how')) {
       return `🐄 **Status Report for ${cow.name} (${cow.id})**:
-• **Risk Level**: ${cow.riskPercentage}% High Mastitis Risk in Stall ${cow.stall}.
-• **Milk Temperature**: Elevated at **${cow.temperature}°C** (normal 38.5°C).
-• **SCC**: ${cow.scc},000 cells/mL (danger zone).
+• **Risk Level**: ${cow.riskPercentage}% ${cow.riskLevel} Mastitis Risk in Stall ${cow.stall}.
+• **Milk Temperature**: **${cow.temperature}°C** (normal 38.5°C).
+• **SCC**: ${cow.scc},000 cells/mL.
+• **Affected Quarter**: ${cow.affectedQuarter || 'Left-rear quarter'}.
 • **Assigned Doctor**: Dr. Rajesh Sharma (+91 98960 11982) has been notified. Mobile van arriving in ~35 mins.`;
     }
 

@@ -19,16 +19,34 @@ const isProd = process.env.NODE_ENV === 'production';
 function generateFallbackVeterinaryResponse(
   message: string,
   cowContext?: any,
-  language?: string
+  herdList?: Array<any>
 ): string {
   const query = (message || '').toLowerCase();
-  const cowName = cowContext?.name || 'Lakshmi';
-  const cowId = cowContext?.id || 'C-024';
-  const vetName = cowContext?.vetName || 'Dr. Rajesh Sharma';
-  const vetPhone = cowContext?.vetPhone || '+91 98960 11982';
-  const milkTemp = cowContext?.temperature || 40.1;
-  const scc = cowContext?.scc || 450;
-  const affectedQuarter = cowContext?.affectedQuarter || 'Left-rear quarter';
+  // Mention wins: if user names another cow, answer about THAT cow
+  let cow: any = cowContext;
+  if (Array.isArray(herdList) && herdList.length > 0) {
+    const byId = herdList.findIndex((c: any) => {
+      const id = String(c?.id || '').toLowerCase();
+      return id && (query.includes(id) || query.includes(id.replace(/[^a-z0-9]/g, '')));
+    });
+    if (byId >= 0) cow = { ...(cowContext || {}), ...herdList[byId] };
+    else {
+      const sorted = [...herdList].filter((c: any) => c?.name).sort((a: any, b: any) => String(b.name).length - String(a.name).length);
+      for (const c of sorted) {
+        if (query.includes(String(c.name).toLowerCase().trim())) { cow = { ...(cowContext || {}), ...c }; break; }
+      }
+    }
+  }
+  const cowName = cow?.name || 'Lakshmi';
+  const cowId = cow?.id || 'C-024';
+  const vetName = cow?.vetName || cowContext?.vetName || 'Dr. Rajesh Sharma';
+  const vetPhone = cow?.vetPhone || cowContext?.vetPhone || '+91 98960 11982';
+  const milkTemp = cow?.temperature || 40.1;
+  const scc = cow?.scc || 450;
+  const affectedQuarter = cow?.affectedQuarter || 'Left-rear quarter';
+  const stall = cow?.stall || 4;
+  const riskPct = cow?.riskPercentage || 82;
+  const riskLvl = cow?.riskLevel || 'High';
 
   // 1. Milk Temperature queries
   if (query.includes('temperature') || query.includes('milk temp') || query.includes('temp') || query.includes('तापमान') || query.includes('வெப்பநிலை')) {
@@ -52,13 +70,12 @@ function generateFallbackVeterinaryResponse(
   }
 
   // 3. Why is Lakshmi / Cow high risk queries
-  if (query.includes(cowName.toLowerCase()) || query.includes(cowId.toLowerCase()) || query.includes('why') || query.includes('risk')) {
+  if (query.includes(cowName.toLowerCase()) || query.includes(String(cowId).toLowerCase()) || query.includes('why') || query.includes('risk') || query.includes('how is') || query.includes('how')) {
     return `🐄 **Clinical Summary for ${cowName} (${cowId})**:
-• **Risk Level**: 82% High Mastitis Risk in Stall ${cowContext?.stall || 4}.
-• **Milk Temperature**: Elevated at ${milkTemp}°C (normal 38.5°C).
-• **Somatic Cells**: ${scc},000 cells/mL (dangerously elevated).
-• **Affected Teat**: ${affectedQuarter} is hot, sensitive, and yielding 18.2 L (down from 27 L).
-• **Rumination**: Down by 130 minutes (cow is lethargic and resting less).
+• **Risk Level**: ${riskPct}% ${riskLvl} Mastitis Risk in Stall ${stall}.
+• **Milk Temperature**: ${milkTemp}°C (normal 38.5°C).
+• **Somatic Cells**: ${scc},000 cells/mL.
+• **Affected Quarter**: ${affectedQuarter}.
 • **Doctor Alert**: Mobile veterinary van dispatched. Contact ${vetName} at ${vetPhone}.`;
   }
 
@@ -148,33 +165,55 @@ CRITICAL DOMAIN RULES:
   // POST /api/gemini/chat
   app.post('/api/gemini/chat', async (req, res) => {
     try {
-      const { message, history, cowContext, language } = req.body;
+      const { message, history, cowContext, herdList } = req.body;
       if (!message || typeof message !== 'string') {
         return res.status(400).json({ error: 'Message is required' });
       }
 
+      // Resolve named cow from herdList (mention wins over focus)
+      let resolvedCow: any = cowContext || null;
+      if (Array.isArray(herdList) && herdList.length > 0) {
+        const q = message.toLowerCase();
+        const byId = herdList.findIndex((c: any) => {
+          const id = String(c?.id || '').toLowerCase();
+          return id && (q.includes(id) || q.includes(id.replace(/[^a-z0-9]/g, '')));
+        });
+        if (byId >= 0) resolvedCow = { ...(cowContext || {}), ...herdList[byId] };
+        else {
+          const sorted = [...herdList].filter((c: any) => c?.name).sort((a: any, b: any) => String(b.name).length - String(a.name).length);
+          for (const c of sorted) {
+            if (q.includes(String(c.name).toLowerCase().trim())) { resolvedCow = { ...(cowContext || {}), ...c }; break; }
+          }
+        }
+      }
+
       if (!ai) {
-        const fallbackReply = generateFallbackVeterinaryResponse(message, cowContext, language);
-        return res.json({ reply: fallbackReply, source: 'offline-knowledge-base' });
+        const fallbackReply = generateFallbackVeterinaryResponse(message, resolvedCow, herdList);
+        return res.json({ reply: fallbackReply, source: 'offline-knowledge-base', resolvedCow: resolvedCow ? { id: resolvedCow.id, name: resolvedCow.name } : null });
       }
 
       // Format contents with history
       const contents: Array<{ role: string; parts: Array<{ text: string }> }> = [];
 
-      if (cowContext) {
-        contents.push({
-          role: 'user',
-          parts: [{
-            text: `[CURRENT FARM TELEMETRY: Cow ${cowContext.name || 'Lakshmi'} (${cowContext.id || 'C-024'}), Stall: ${cowContext.stall || 4}, SCC: ${cowContext.scc || 450}k cells/mL, Milk Temperature: ${cowContext.temperature || 40.1}°C, Mastitis Risk: ${cowContext.riskLevel || 'High'} (${cowContext.riskPercentage || 82}%), Affected Quarter: ${cowContext.affectedQuarter || 'Left-rear'}, Assigned Vet: ${cowContext.vetName || 'Dr. Rajesh Sharma'} (${cowContext.vetPhone || '+91 98960 11982'})]`
-          }]
-        });
-        contents.push({
-          role: 'model',
-          parts: [{
-            text: `Understood. I have active telemetry for ${cowContext.name || 'the cow'}. How can I assist you with herd health today?`
-          }]
-        });
+      if (Array.isArray(herdList) && herdList.length > 0) {
+        const roster = herdList.slice(0, 24).map((c: any) => `${c.name || '?'} (${c.id || '?'}) SCC ${c.scc ?? '?'}k temp ${c.temperature ?? '?'}C ${c.riskLevel || ''} stall ${c.stall ?? '?'}`).join(' | ');
+        contents.push({ role: 'user', parts: [{ text: `[HERD ROSTER: ${roster}]. The user may ask about ANY cow by name or ID — always answer about the cow they named, using its roster telemetry. The focused cow is only a default when no cow is named.]` }] });
+        contents.push({ role: 'model', parts: [{ text: 'Understood. I will answer about whichever cow the user names, using roster telemetry.' }] });
       }
+
+      const rc = resolvedCow || {};
+      contents.push({
+        role: 'user',
+        parts: [{
+          text: `[FOCUSED COW TELEMETRY: Cow ${rc.name || 'Lakshmi'} (${rc.id || 'C-024'}), Stall: ${rc.stall || 4}, SCC: ${rc.scc || 450}k cells/mL, Milk Temperature: ${rc.temperature || 40.1}°C, Mastitis Risk: ${rc.riskLevel || 'High'} (${rc.riskPercentage || 82}%), Affected Quarter: ${rc.affectedQuarter || 'Left-rear'}, Assigned Vet: ${rc.vetName || 'Dr. Rajesh Sharma'} (${rc.vetPhone || '+91 98960 11982'})]`
+        }]
+      });
+      contents.push({
+        role: 'model',
+        parts: [{
+          text: `Understood. I have active telemetry for ${rc.name || 'the cow'}. How can I assist you with herd health today?`
+        }]
+      });
 
       if (Array.isArray(history)) {
         for (const item of history.slice(-6)) {
@@ -201,11 +240,11 @@ CRITICAL DOMAIN RULES:
         },
       });
 
-      const replyText = response.text || generateFallbackVeterinaryResponse(message, cowContext, language);
-      return res.json({ reply: replyText, source: 'gemini-3.8-flash' });
+      const replyText = response.text || generateFallbackVeterinaryResponse(message, resolvedCow, herdList);
+      return res.json({ reply: replyText, source: 'gemini-3.8-flash', resolvedCow: resolvedCow ? { id: resolvedCow.id, name: resolvedCow.name } : null });
     } catch (err: any) {
       console.error('Gemini chat API error:', err?.message || err);
-      const fallbackReply = generateFallbackVeterinaryResponse(req.body?.message || '', req.body?.cowContext, req.body?.language);
+      const fallbackReply = generateFallbackVeterinaryResponse(req.body?.message || '', req.body?.cowContext, req.body?.herdList);
       return res.json({ reply: fallbackReply, source: 'offline-knowledge-base', error: err?.message });
     }
   });
